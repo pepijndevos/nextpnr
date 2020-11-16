@@ -121,23 +121,59 @@ NPNR_PACKED_STRUCT(struct ChipInfoPOD {
     uint32_t num_packages;
 });
 
+// new PODs
+
+NPNR_PACKED_STRUCT(struct PairPOD {
+    uint16_t dest_id;
+    uint16_t src_id;
+});
+
+NPNR_PACKED_STRUCT(struct BelsPOD {
+    uint16_t type_id;
+    uint16_t num_ports;
+    RelPtr<PairPOD> ports;
+});
+
+NPNR_PACKED_STRUCT(struct TilePOD /*TidePOD*/ {
+    uint32_t num_bels;
+    RelPtr<BelsPOD> bels;
+    uint32_t num_pips;
+    RelPtr<PairPOD> pips;
+    uint32_t num_clock_pips;
+    RelPtr<PairPOD> clock_pips;
+    uint32_t num_aliases;
+    RelPtr<PairPOD> aliases;
+});
+
+NPNR_PACKED_STRUCT(struct GlobalAliasPOD {
+    uint16_t dest_row;
+    uint16_t dest_col;
+    uint16_t dest_id;
+    uint16_t src_row;
+    uint16_t src_col;
+    uint16_t src_id;
+});
+
 NPNR_PACKED_STRUCT(struct DatabasePOD {
-    uint32_t version;
-    uint32_t num_chips;
-    uint32_t num_loctypes;
     RelPtr<char> family;
-    RelPtr<ChipInfoPOD> chips;
-    RelPtr<LocTypePOD> loctypes;
-    RelPtr<IdStringDBPOD> ids;
+    uint32_t version;
+    uint16_t rows;
+    uint16_t cols;
+    RelPtr<RelPtr<TilePOD>> grid;
+    uint32_t num_aliases;
+    RelPtr<GlobalAliasPOD> aliases;
+    uint16_t num_constids;
+    uint16_t num_ids;
+    RelPtr<RelPtr<char>> id_strs;
 });
 
 // -----------------------------------------------------------------------
 
 // Helper functions for database access
 namespace {
-template <typename Id> const LocTypePOD &chip_loc_data(const DatabasePOD *db, const ChipInfoPOD *chip, const Id &id)
+template <typename Id> const TilePOD &chip_loc_data(const DatabasePOD *db, const Id &id)
 {
-    // return db->loctypes[chip->grid[id.tile].loc_type];
+    return &db->grid[id.tile].get();
 }
 
 // template <typename Id>
@@ -147,29 +183,29 @@ template <typename Id> const LocTypePOD &chip_loc_data(const DatabasePOD *db, co
 //     return db->loctypes[t.loc_type].neighbourhoods[t.neighbourhood_type];
 // }
 
-inline const BelInfoPOD &chip_bel_data(const DatabasePOD *db, const ChipInfoPOD *chip, BelId id)
+inline const BelsPOD &chip_bel_data(const DatabasePOD *db, BelId id)
 {
-    return chip_loc_data(db, chip, id).bels[id.index];
+    return chip_loc_data(db, id).bels[id.index];
 }
-inline const LocWireInfoPOD &chip_wire_data(const DatabasePOD *db, const ChipInfoPOD *chip, WireId id)
+inline const LocWireInfoPOD &chip_wire_data(const DatabasePOD *db, WireId id)
 {
-    return chip_loc_data(db, chip, id).wires[id.index];
+    // return chip_loc_data(db, id).wires[id.index];
 }
-inline const PipInfoPOD &chip_pip_data(const DatabasePOD *db, const ChipInfoPOD *chip, PipId id)
+inline const PairPOD &chip_pip_data(const DatabasePOD *db, PipId id)
 {
-    return chip_loc_data(db, chip, id).pips[id.index];
+    return chip_loc_data(db, id).pips[id.index];
 }
-inline bool chip_rel_tile(const ChipInfoPOD *chip, int32_t base, int16_t rel_x, int16_t rel_y, int32_t &next)
+inline bool chip_rel_tile(const DatabasePOD *chip, int32_t base, int16_t rel_x, int16_t rel_y, int32_t &next)
 {
-    int32_t curr_x = base % chip->width;
-    int32_t curr_y = base / chip->width;
+    int32_t curr_x = base % chip->cols;
+    int32_t curr_y = base / chip->cols;
     int32_t new_x = curr_x + rel_x;
     int32_t new_y = curr_y + rel_y;
-    if (new_x < 0 || new_x >= chip->width)
+    if (new_x < 0 || new_x >= chip->cols)
         return false;
-    if (new_y < 0 || new_y >= chip->height)
+    if (new_y < 0 || new_y >= chip->rows)
         return false;
-    next = new_y * chip->width + new_x;
+    next = new_y * chip->cols + new_x;
     return true;
 }
 inline int32_t chip_tile_from_xy(const ChipInfoPOD *chip, int32_t x, int32_t y) { return y * chip->width + x; }

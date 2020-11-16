@@ -61,19 +61,41 @@ void IdString::initialize_arch(const BaseCtx *ctx)
 
 Arch::Arch(ArchArgs args) : args(args)
 {
-    family = "GW1N";
-    device = "GW1N-9";
+    family = "GW1N-9";
+    device = "GW1NR-9";
     speed = "C6/E5"; // or whatever
     package = "QFN48"; // or something
     rating = "R";
     variant = "";
 
     // Load database
-    std::string chipdb = stringf("gowin/chipdb-%s.bin", device.c_str());
-    auto db_ptr = reinterpret_cast<const RelPtr<DatabasePOD> *>(get_chipdb(chipdb));
-    if (db_ptr == nullptr)
+    std::string chipdb = stringf("gowin/chipdb-%s.bin", family.c_str());
+    auto db = reinterpret_cast<const DatabasePOD*>(get_chipdb(chipdb));
+    if (db == nullptr)
         log_error("Failed to load chipdb '%s'\n", chipdb.c_str());
-    db = db_ptr->get();
+    log_info("rows %d\n", db->rows);
+    log_info("cols %d\n", db->cols);
+    log_info("alias %s\n", db->id_strs[db->aliases[3].dest_id].get());
+    auto tile = db->grid[db->cols*2+2].get();
+    for (int i=0; i < tile->num_bels; i++) {
+        auto bel = &tile->bels[i];
+        log_info("bel %s\n", db->id_strs[bel->type_id].get());
+        for (int j=0; j < bel->num_ports; j++) {
+            uint16_t dest = bel->ports[j].dest_id;
+            uint16_t src = bel->ports[j].src_id;
+            log_info("port %s %s\n",
+                db->id_strs[dest].get(),
+                db->id_strs[src].get());
+        }
+    }
+    for (int i=0; i < tile->num_pips; i++) {
+        auto pip = &tile->pips[i];
+        uint16_t dest = pip->dest_id;
+        uint16_t src = pip->src_id;
+        log_info("pip %s %s\n",
+            db->id_strs[dest].get(),
+            db->id_strs[src].get());
+    }
     // Check database version and family
     if (db->version != bba_version) {
         log_error("Provided database version %d is %s than nextpnr version %d, please rebuild database/nextpnr.\n",
@@ -95,15 +117,15 @@ Arch::Arch(ArchArgs args) : args(args)
     // if (!chip_info)
     //     log_error("Unknown device '%s'.\n", device.c_str());
     // Set up bba IdStrings
-    for (size_t i = 0; i < db->ids->num_bba_ids; i++) {
-        IdString::initialize_add(this, db->ids->bba_id_strs[i].get(), uint32_t(i) + db->ids->num_file_ids);
+    for (size_t i = 0; i < db->num_ids; i++) {
+        IdString::initialize_add(this, db->id_strs[i].get(), uint32_t(i)+db->num_constids);
     }
     // Set up validity structures
-    tileStatus.resize(chip_info->num_tiles);
-    // for (size_t i = 0; i < chip_info->num_tiles; i++) {
-    //     tileStatus[i].boundcells.resize(db->loctypes[chip_info->grid[i].loc_type].num_bels);
-    // }
-    // init_cell_pin_data();
+    tileStatus.resize(db->rows*db->cols);
+    for (size_t i = 0; i < db->rows*db->cols; i++) {
+        tileStatus[i].boundcells.resize(db->grid[i]->num_bels);
+    }
+    //init_cell_pin_data();
     // Validate and set up package
     // package_idx = -1;
     // for (size_t i = 0; i < chip_info->num_packages; i++) {
@@ -463,12 +485,12 @@ bool Arch::place()
 
     if (placer == "heap") {
         PlacerHeapCfg cfg(getCtx());
-        cfg.ioBufTypes.insert(id_SEIO33_CORE);
-        cfg.ioBufTypes.insert(id_SEIO18_CORE);
-        cfg.ioBufTypes.insert(id_OSC_CORE);
-        cfg.cellGroups.emplace_back();
-        cfg.cellGroups.back().insert(id_OXIDE_COMB);
-        cfg.cellGroups.back().insert(id_OXIDE_FF);
+        // cfg.ioBufTypes.insert(id_SEIO33_CORE);
+        // cfg.ioBufTypes.insert(id_SEIO18_CORE);
+        // cfg.ioBufTypes.insert(id_OSC_CORE);
+        // cfg.cellGroups.emplace_back();
+        // cfg.cellGroups.back().insert(id_OXIDE_COMB);
+        // cfg.cellGroups.back().insert(id_OXIDE_FF);
 
         cfg.beta = 0.7;
         cfg.criticalityExponent = 7;
