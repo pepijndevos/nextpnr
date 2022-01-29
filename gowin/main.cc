@@ -62,6 +62,7 @@ std::unique_ptr<Context> GowinCommandHandler::createContext(dict<std::string, Pr
         log_error("Invalid device %s\n", device.c_str());
     }
     ArchArgs chipArgs;
+    chipArgs.gui = vm.count("gui") != 0;
     if (vm.count("family")) {
 	    chipArgs.family = vm["family"].as<std::string>();
     } else {
