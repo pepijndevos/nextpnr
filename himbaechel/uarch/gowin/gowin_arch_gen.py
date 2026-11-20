@@ -779,7 +779,8 @@ def create_nodes_with_empty_area(chip: Chip, db: chipdb):
                     nodes.append([NodeWire(x, y, f'CIN0'), NodeWire(dst_x, y, f'COUT5')])
 
     for node in nodes:
-        chip.add_node(node)
+        root = node[0]
+        chip.add_node(node, xcross_node_class(db, root.x, root.y, root.wire, fanout_node_class(db, node)))
     create_global_nodes(chip, db)
 
 # Wire classes whose delay depends on fanout
