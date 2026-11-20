@@ -1,3 +1,4 @@
+#include <cctype>
 #include <map>
 #include <regex>
 
@@ -50,6 +51,10 @@ struct GowinImpl : HimbaechelAPI
     bool checkPipAvail(PipId pip) const override;
     bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override;
 
+    // timing
+    bool getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const override;
+    TimingPortClass getPortTimingClass(const CellInfo *cell, IdString port, int &clockInfoCount) const override;
+
     // Cluster
     bool isClusterStrict(const CellInfo *cell) const override { return true; }
     bool getClusterPlacement(ClusterId cluster, BelId root_bel,
@@ -84,6 +89,9 @@ struct GowinImpl : HimbaechelAPI
     };
     std::vector<GowinCellInfo> fast_cell_info;
     void assign_cell_info();
+    void assign_dsp_timing();
+    bool is_comb_mult(const CellInfo *cell) const;
+    IdString dsp_bus_name(IdString port) const;
 
     // If there is an unused LUT adjacent to FF, use it
     void create_passthrough_luts(void);
@@ -897,6 +905,7 @@ void GowinImpl::prePlace()
     place_constrained_hclk_cells();
     ctx->assignArchInfo();
     assign_cell_info();
+    assign_dsp_timing();
     fast_logic_cell.reset(ctx->getGridDimX(), ctx->getGridDimY());
     for (auto bel : ctx->getBels()) {
         if (ctx->getBelType(bel) == id_LUT4) {
@@ -927,6 +936,65 @@ void GowinImpl::postPlace()
 }
 
 void GowinImpl::preRoute() { gowin_route_globals(ctx); }
+
+// Multipliers with all registers bypassed are timed from a <type>_COMB cell
+// variant whose arcs are per bus (A -> DOUT and so on), so the chip database does
+// not need an arc for every pair of bits. Registered multipliers are not timed.
+void GowinImpl::assign_dsp_timing()
+{
+    if (!ctx->speed_grade)
+        return;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (!ci->type.in(id_MULT9X9, id_MULT18X18, id_MULT36X36))
+            continue;
+        bool registered = false;
+        for (IdString param :
+             {id_AREG, id_BREG, id_ASIGN_REG, id_BSIGN_REG, id_PIPE_REG, id_OUT_REG, id_OUT0_REG, id_OUT1_REG}) {
+            if (ci->params.count(param) && ci->params.at(param).as_int64() != 0)
+                registered = true;
+        }
+        ci->timing_index = registered ? -1 : ctx->get_cell_timing_idx(ctx->idf("%s_COMB", ci->type.c_str(ctx)));
+    }
+}
+
+bool GowinImpl::is_comb_mult(const CellInfo *cell) const
+{
+    return cell->timing_index != -1 && cell->type.in(id_MULT9X9, id_MULT18X18, id_MULT36X36);
+}
+
+// A[5] and A5 -> A
+IdString GowinImpl::dsp_bus_name(IdString port) const
+{
+    std::string name = port.str(ctx);
+    size_t end = name.find('[');
+    if (end == std::string::npos) {
+        end = name.size();
+        while (end > 0 && std::isdigit(static_cast<unsigned char>(name[end - 1])))
+            --end;
+    }
+    return ctx->id(name.substr(0, end));
+}
+
+bool GowinImpl::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const
+{
+    if (is_comb_mult(cell))
+        return ctx->lookup_cell_delay(cell->timing_index, dsp_bus_name(fromPort), dsp_bus_name(toPort), delay);
+    return HimbaechelAPI::getCellDelay(cell, fromPort, toPort, delay);
+}
+
+TimingPortClass GowinImpl::getPortTimingClass(const CellInfo *cell, IdString port, int &clockInfoCount) const
+{
+    if (is_comb_mult(cell)) {
+        clockInfoCount = 0;
+        IdString bus = dsp_bus_name(port);
+        if (cell->ports.at(port).type == PORT_OUT)
+            return bus == id_DOUT ? TMG_COMB_OUTPUT : TMG_IGNORE;
+        DelayQuad delay;
+        return ctx->lookup_cell_delay(cell->timing_index, bus, id_DOUT, delay) ? TMG_COMB_INPUT : TMG_IGNORE;
+    }
+    return HimbaechelAPI::getPortTimingClass(cell, port, clockInfoCount);
+}
 
 void GowinImpl::postRoute()
 {

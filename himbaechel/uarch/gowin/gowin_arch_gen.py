@@ -2087,6 +2087,20 @@ def create_timing_info(chip: Chip, db: chipdb.Device):
                         dp.add_setup_hold("CLKB", sig, ClockEdge.RISING, group_to_timingvalue(arc[f"clkb_{sig.lower()}_set"]), group_to_timingvalue(arc[f"clkb_{sig.lower()}_hold"]))
 
 
+            elif group == "mult":
+                # Multipliers with all registers bypassed. The arcs are per bus;
+                # GowinImpl::getCellDelay maps the A0..A17 ports and so on to A.
+                for name in ("MULT9X9_COMB", "MULT18X18_COMB"):
+                    mult = tmg.add_cell_variant(speed, name)
+                    for port, key in (("A", "mdia_mout"), ("B", "mdib_mout"), ("SIA", "sdia_mout"),
+                                      ("SIB", "sdib_mout"), ("ASIGN", "asign_mout"), ("BSIGN", "bsign_mout"),
+                                      ("ASEL", "asel_mout"), ("BSEL", "bsel_mout")):
+                        mult.add_comb_arc(port, "DOUT", group_to_timingvalue(arc[key]))
+            elif group == "mult36x36":
+                mult = tmg.add_cell_variant(speed, "MULT36X36_COMB")
+                for port, key in (("A", "mdia_mout"), ("B", "mdib_mout"), ("ASIGN", "asign_mout"),
+                                  ("BSIGN", "bsign_mout")):
+                    mult.add_comb_arc(port, "DOUT", group_to_timingvalue(arc[key]))
             elif group == "fanout":
                 pass # handled in "wire"
             elif group == "glbsrc":
