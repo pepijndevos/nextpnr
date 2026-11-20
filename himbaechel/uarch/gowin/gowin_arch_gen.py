@@ -794,6 +794,71 @@ def fanout_node_class(db: chipdb, wires):
             return cls
     return ""
 
+# GW5A: X1/X2/X8 wires that cross a BSRAM or DSP row, the VIQ column or a
+# repeater column are slower (STA::TmModelNew::getWiresDlyNew, IDE 1.9.10.03).
+# Apicula gives the crossing rows and columns as timing group 'xcross'
+# ({'R<row>': flag, 'C<col>': flag}) and the delays as 'xwire'. Such a wire gets
+# its own node class, whose cap carries the extra delay: getPipDelay adds
+# res / 2 * cap of the destination node to the pip that drives the wire.
+# Vendor flags: 2 VBUF_EBR, 4 VBUF_DSP, 6 HBUF_VIQ, 8 HBUF_RPT, 10 HBUF_SPINE
+# (buffered: the wire is driven again after the crossing), 1 VOS_EBR, 3 VOS_DSP,
+# 5 HOS_VIQ, 7 HOS_RPT, 9 HOS_SPINE (an adder).
+XCROSS_BUF = {2: "VBUF_EBR", 4: "VBUF_DSP", 6: "HBUF_VIQ", 8: "HBUF_RPT", 10: "HBUF_SPINE"}
+XCROSS_ADD = {1: "VOS_EBR", 3: "VOS_DSP", 5: "HOS_VIQ", 7: "HOS_RPT", 9: "HOS_SPINE"}
+xcross_classes = {}  # node class -> (base class, (length, mid flag, mid offset, end flag, end offset))
+
+def xcross_flag(xcross, d, x, y, seg):
+    # flag and root offset of the segment seg tiles from the root; the boundary of
+    # row or column p lies between p and p + 1, and later entries overwrite earlier ones
+    if d in "NS":
+        pos, end, key = y, y + (seg if d == "S" else -seg), "R"
+    else:
+        pos, end, key = x, x + (seg if d == "E" else -seg), "C"
+    res = (0, 0)
+    for name, flag in xcross.items():
+        if name[0] != key:
+            continue
+        p = int(name[1:])
+        if (end > pos and pos <= p < end) or (end < pos and end <= p < pos):
+            res = (flag, abs(pos - p))
+    return res
+
+def xcross_node_class(db: chipdb, x: int, y: int, wire: str, base: str):
+    xcross = next(iter(db.timing.values()), {}).get("xcross")
+    m = re.fullmatch(r"([NESW])([128])\d0", wire)
+    if not xcross or not m or not base:
+        return base
+    d, length = m[1], int(m[2])
+    mf, moff = xcross_flag(xcross, d, x, y, length // 2) if length > 1 else (0, 0)
+    ef, eoff = xcross_flag(xcross, d, x, y, length)
+    if not mf and not ef:
+        return base
+    sig = (length, mf, moff, ef, eoff)
+    name = f"{base}_XC{length}_{mf}_{moff}_{ef}_{eoff}"
+    xcross_classes[name] = (base, sig)
+    return name
+
+def xcross_extra(xwire, sig):
+    # extra delay in ns over the plain wire, for a load after the crossing
+    length, mf, moff, ef, eoff = sig
+    w = f"X{length}"
+    val = lambda name: max(xwire.get(name, [0.0]))
+    base = val(w)
+    def buf(flag, off):
+        return max(0.0, val(f"{w}_{XCROSS_BUF[flag]}") - (length - off) * val(f"{w}_{XCROSS_BUF[flag]}_LOAD_DERATE"))
+    odd = lambda f: f % 2 == 1
+    even = lambda f: f != 0 and f % 2 == 0
+    if odd(ef) and (mf == 0 or odd(mf)):
+        return val(f"{w}_{XCROSS_ADD[ef]}")
+    if mf == 0 and even(ef):
+        return buf(ef, eoff) + val(f"{w}_{XCROSS_BUF[ef]}") - base
+    if even(mf) and even(ef):
+        return buf(ef, moff) + val(f"{w}_{XCROSS_BUF[mf]}") - base
+    if odd(mf) and even(ef):
+        # the vendor charges nothing at the root here, only the segment after the crossing
+        return val(f"{w}_{XCROSS_BUF[ef]}") - base
+    return 0.0
+
 def set_wire_timing_classes(chip: Chip, db: chipdb):
     # node timing for wires that are not part of a node
     names = {idx: name for name, idx in chip.strs.strs.items()}
@@ -854,7 +919,8 @@ def create_nodes(chip: Chip, db: chipdb):
                                   NodeWire(x - 1, y, f'COUT5')])
 
     for node in nodes:
-        chip.add_node(node, fanout_node_class(db, node))
+        root = node[0]
+        chip.add_node(node, xcross_node_class(db, root.x, root.y, root.wire, fanout_node_class(db, node)))
     create_global_nodes(chip, db)
 
 def create_switch_matrix(tt: TileType, db: chipdb, x: int, y: int):
@@ -2102,12 +2168,27 @@ def create_timing_info(chip: Chip, db: chipdb.Device):
                     tmg.set_pip_class(speed, name, group_to_timingvalue(arc[name]))
             elif group == "wire":
                 fanout = groups["fanout"]
-                # wire delay (if any) + fanout delay; cell outputs are fanout-only
+                xwire, xfanout = groups.get("xwire"), groups.get("xfanout")
+                node_res = {}
+                # wires with delay and fanout delay; cell outputs have fanout delay only
                 for name, fan in FANOUT_CLASSES.items():
-                    delay = group_to_timingvalue(arc[name]) if name in arc else TimingValue()
-                    tmg.set_pip_class(speed, name, delay, group_to_timingvalue(fanout[fan]), TimingValue())
+                    if xwire:
+                        # GW5A: per-load fanout ratios; the 1-4 load range is the common case
+                        vname = {"FX1": "X1", "LUT_OUT": "F", "FF_OUT": "Q", "OF": "OFX"}.get(name, name)
+                        delay = group_to_timingvalue(xwire[vname]) if vname in xwire else TimingValue()
+                        fan_delay, fan_num = group_to_timingvalue(xfanout[f"FAN_RATIO_{vname}_range_1_5"]), 1
+                    else:
+                        delay = group_to_timingvalue(arc[name]) if name in arc else TimingValue()
+                        fan_delay, fan_num = group_to_timingvalue(fanout[fan]), fanout[f"{fan}Num"]
+                    tmg.set_pip_class(speed, name, delay, fan_delay, TimingValue())
                     # getPipDelay adds res / 2 of the source node
-                    tmg.set_node_class(speed, name, TimingValue(), TimingValue(round(2e6 / fanout[f"{fan}Num"])))
+                    node_res[name] = round(2e6 / fan_num)
+                    tmg.set_node_class(speed, name, TimingValue(), TimingValue(node_res[name]))
+                for cls, (base, sig) in xcross_classes.items():
+                    # extra delay in ps = res / 2 * cap / 1e6
+                    extra = round(xcross_extra(xwire, sig) * 1000) if xwire else 0
+                    cap = round(extra * 2e6 / node_res[base])
+                    tmg.set_node_class(speed, cls, TimingValue(), TimingValue(node_res[base]), TimingValue(cap))
                 # wires with delay but no fanout delay
                 for name in ["X0CTL", "X0CLK"]:
                     tmg.set_pip_class(speed, name, group_to_timingvalue(arc[name]))
